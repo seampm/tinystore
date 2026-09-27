@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tinystore — live cluster demo</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #0d1117; color: #e6edf3; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { padding: 28px 24px 8px; max-width: 1100px; margin: 0 auto; }
+  header h1 { font-size: 22px; font-weight: 600; }
+  header h1 span { color: #58a6ff; }
+  header p { color: #8b949e; font-size: 13px; margin-top: 8px; line-height: 1.6; }
+  header a { color: #58a6ff; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px 24px 48px; }
+  .stats { display: flex; gap: 24px; flex-wrap: wrap; margin: 12px 0 16px; font-size: 13px; }
+  .stat b { display: block; font-size: 20px; font-weight: 600; }
+  .stat span { color: #8b949e; }
+  canvas { width: 100%; background: #161b22; border: 1px solid #30363d; border-radius: 8px; display: block; }
+  .controls { display: flex; gap: 10px; align-items: center; margin: 12px 0; font-size: 13px; color: #8b949e; flex-wrap: wrap; }
+  button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer; }
+  button:hover { background: #30363d; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.danger:hover { background: #5a1f1f; border-color: #f85149; }
+  .log { margin-top: 16px; }
+  .log h2, .sec h2 { font-size: 14px; margin-bottom: 8px; color: #8b949e; font-weight: 600; }
+  #events { height: 190px; overflow-y: auto; font-size: 12px; border: 1px solid #30363d; border-radius: 8px; background: #161b22; padding: 8px 12px; line-height: 1.7; }
+  #events .t { color: #6e7681; margin-right: 8px; }
+  #events .ok { color: #3fb950; } #events .warn { color: #d29922; } #events .err { color: #f85149; } #events .info { color: #58a6ff; }
+  .sec { margin-top: 28px; font-size: 13px; line-height: 1.7; color: #8b949e; }
+  .sec code { color: #e6edf3; background: #21262d; padding: 1px 5px; border-radius: 4px; }
+  .sec table { border-collapse: collapse; margin-top: 10px; font-size: 12px; }
+  .sec th, .sec td { border: 1px solid #30363d; padding: 6px 12px; text-align: left; }
+  .sec th { color: #e6edf3; background: #161b22; }
+  .legend { display: flex; gap: 18px; font-size: 12px; color: #8b949e; margin: 8px 0; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tinystore <span>— live cluster demo</span></h1>
+  <p>A simulated 3-node tinystore cluster running the real routing logic in your browser:
+  consistent hashing, request forwarding, async replication, and failover.
+  <a href="https://github.com/seampm/tinystore">Code on GitHub</a></p>
+</header>
+<main>
+  <div class="stats">
+    <div class="stat"><b id="s-live">3</b><span>live nodes</span></div>
+    <div class="stat"><b id="s-keys">0</b><span>keys stored</span></div>
+    <div class="stat"><b id="s-ops">0</b><span>ops simulated</span></div>
+    <div class="stat"><b id="s-repl">2</b><span>replication factor</span></div>
+  </div>
+  <canvas id="ring" height="420"></canvas>
+  <div class="legend">
+    <span><i style="background:#58a6ff"></i>node 0</span>
+    <span><i style="background:#3fb950"></i>node 1</span>
+    <span><i style="background:#d29922"></i>node 2</span>
+    <span><i style="background:#f85149"></i>dead node</span>
+    <span><i style="background:#e6edf3"></i>request in flight</span>
+  </div>
+  <div class="controls">
+    <button id="b-write">Write random key</button>
+    <button id="b-read">Read random key</button>
+    <button id="b-kill" class="danger">Kill node 1</button>
+    <button id="b-restart" disabled>Restart node 1</button>
+    <button id="b-auto">Auto traffic: on</button>
+    <button id="b-reset">Reset</button>
+  </div>
+  <div class="log">
+    <h2>Event log</h2>
+    <div id="events"></div>
+  </div>
+  <div class="sec">
+    <h2>What you're watching</h2>
+    <p>Keys hash onto a <code>consistent hash ring</code> (this is the actual FNV-1a +
+    avalanche hash from the C++ code, compiled to JS). Each key is owned by one node
+    and replicated to its successor. Any node accepts any request and <code>forwards</code>
+    it to the owner; the owner applies the write, acks immediately, and a background
+    sender replicates <code>asynchronously</code>. Kill a node and the ring re-converges:
+    reads keep working from replicas, and the restarted node heals via <code>SYNC</code>.</p>
+    <h2 style="margin-top:20px">Measured on real hardware</h2>
+    <p>2-core VM, localhost, 4 server workers, 4 benchmark threads × 4 connections ×
+    pipeline depth 16, 64-byte values:</p>
+    <table>
+      <tr><th>Setup</th><th>Throughput</th><th>p50</th><th>p99</th></tr>
+      <tr><td>Single node, repl=1, 90% GET</td><td>150,169 ops/sec</td><td>0.262 ms</td><td>1.031 ms</td></tr>
+      <tr><td>3 nodes, repl=2, 90% GET</td><td>31,707 ops/sec</td><td>0.967 ms</td><td>11.43 ms</td></tr>
+      <tr><td>3 nodes, repl=2, 50% GET</td><td>20,603 ops/sec</td><td>1.458 ms</td><td>18.48 ms</td></tr>
+    </table>
+  </div>
+</main>
+<script>
+"use strict";
+// --- hash: FNV-1a + avalanche finalizer (mirrors src/ring.h) ---
+function hashKey(s) {
+  let h = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+const VNODES = 160, RING = 0x100000000;
+const COLORS = ["#58a6ff", "#3fb950", "#d29922"];
+const DEAD = "#f85149";
+let nodes, store, vnodes, liveCount, ops, autoOn, flights, keySeq, deadNode;
+let logEl, events = [];
+
+function buildRing() {
+  vnodes = [];
+  for (const n of nodes) {
+    if (!n.live) continue;
+    for (let i = 0; i < VNODES; i++)
+      vnodes.push({ h: hashKey("node" + n.id + "#" + i), node: n.id });
+  }
+  vnodes.sort((a, b) => a.h - b.h);
+}
+function ownerOf(key) {
+  const h = hashKey(key);
+  let lo = 0, hi = vnodes.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (vnodes[m].h < h) lo = m + 1; else hi = m; }
+  return vnodes[lo % vnodes.length].node;
+}
+function replicasOf(key, r) {
+  const h = hashKey(key);
+  let lo = 0, hi = vnodes.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (vnodes[m].h < h) lo = m + 1; else hi = m; }
+  const out = [];
+  for (let i = 0; i < vnodes.length && out.length < r; i++) {
+    const nd = vnodes[(lo + i) % vnodes.length].node;
+    if (!out.includes(nd)) out.push(nd);
+  }
+  return out;
+}
+function reset() {
+  nodes = [{id:0,live:true},{id:1,live:true},{id:2,live:true}];
+  store = new Map(); liveCount = 3; ops = 0; flights = []; keySeq = 0; deadNode = -1;
+  buildRing();
+  document.getElementById("b-kill").disabled = false;
+  document.getElementById("b-kill").textContent = "Kill node 1";
+  document.getElementById("b-restart").disabled = true;
+  log("info", "cluster up: 3 nodes, replication factor 2");
+  updateStats();
+}
+function log(cls, msg) {
+  const t = new Date();
+  const ts = String(t.getMinutes()).padStart(2,"0")+":"+String(t.getSeconds()).padStart(2,"0");
+  const div = document.createElement("div");
+  div.innerHTML = '<span class="t">'+ts+'</span><span class="'+cls+'">'+msg+'</span>';
+  logEl.prepend(div);
+  while (logEl.children.length > 60) logEl.lastChild.remove();
+}
+function updateStats() {
+  document.getElementById("s-live").textContent = liveCount;
+  document.getElementById("s-keys").textContent = store.size;
+  document.getElementById("s-ops").textContent = ops;
+}
+function nodePos(id, cx, cy, rad) {
+  // position of a node marker: centroid of its vnodes
+  let sx = 0, sy = 0, n = 0;
+  for (const v of vnodes) if (v.node === id) {
+    const a = (v.h / RING) * Math.PI * 2 - Math.PI/2;
+    sx += Math.cos(a); sy += Math.sin(a); n++;
+  }
+  if (!n) return null;
+  const m = Math.hypot(sx, sy) || 1;
+  return { x: cx + (sx/m) * rad * 0.55, y: cy + (sy/m) * rad * 0.55 };
+}
+function doWrite(key) {
+  key = key || ("key" + String(keySeq++).padStart(5, "0"));
+  const entry = 0; // client always talks to node 0 in this demo
+  const owner = ownerOf(key);
+  const reps = replicasOf(key, 2);
+  store.set(key, {owner, reps});
+  ops++;
+  const o = owner, r2 = reps.find(r => r !== o);
+  if (entry !== o)
+    log("info", "SET " + key + " → node 0 <i>forwards</i> to owner node " + o);
+  else
+    log("info", "SET " + key + " → owner node " + o + " (direct)");
+  flights.push({kind:"fwd", from:entry, to:o, key, t:0, then:() => {
+    log("ok", "node " + o + " applied " + key + ", acked client");
+    flights.push({kind:"repl", from:o, to:r2, key, t:0, then:() =>
+      log("info", "async replication: " + key + " → node " + r2)});
+  }});
+  updateStats();
+}
+function doRead(key) {
+  const keys = [...store.keys()];
+  if (!keys.length) { log("warn", "no keys yet — write something first"); return; }
+  key = key || keys[(Math.random()*keys.length)|0];
+  const entry = 0, owner = ownerOf(key);
+  ops++;
+  const hit = nodes[owner].live;
+  flights.push({kind:"fwd", from:entry, to:owner, key, t:0, then:() => {
+    if (hit) log("ok", "GET " + key + " → node " + owner + " <b>HIT</b>");
+    else {
+      const r2 = replicasOf(key, 2).find(r => r !== owner);
+      log("warn", "GET " + key + " → owner node " + owner + " is dead, <i>failing over</i> to replica node " + r2);
+      flights.push({kind:"fwd", from:entry, to:r2, key, t:0, then:() =>
+        log("ok", "GET " + key + " → replica node " + r2 + " <b>HIT</b>")});
+    }
+  }});
+  updateStats();
+}
+function killNode() {
+  deadNode = 1;
+  nodes[1].live = false; liveCount = 2;
+  buildRing();
+  // drop keys whose owner+replica are both dead (none here: repl=2, 1 dead)
+  document.getElementById("b-kill").disabled = true;
+  document.getElementById("b-restart").disabled = false;
+  log("err", "node 1 killed (SIGKILL) — ring re-converged over 2 live nodes");
+  log("warn", "replication queues for node 1 dropped; it will SYNC on rejoin");
+  updateStats();
+}
+function restartNode() {
+  nodes[1].live = true; liveCount = 3;
+  buildRing();
+  document.getElementById("b-kill").disabled = false;
+  document.getElementById("b-restart").disabled = true;
+  log("info", "node 1 restarted — streaming SYNC from a live peer…");
+  setTimeout(() => { log("ok", "node 1 SYNC complete, serving its key range"); updateStats(); }, 1200);
+  updateStats();
+}
+// --- rendering ---
+const cv = document.getElementById("ring"), ctx = cv.getContext("2d");
+function draw() {
+  const W = cv.width = cv.clientWidth * 2, H = cv.height = 840;
+  const cx = W/2, cy = H/2 - 20, rad = Math.min(W,H)/2 - 60;
+  ctx.clearRect(0,0,W,H);
+  // ring segments per owner
+  if (vnodes.length) {
+    for (let i = 0; i < vnodes.length; i++) {
+      const a0 = (vnodes[i].h / RING) * Math.PI*2 - Math.PI/2;
+      const a1 = (vnodes[(i+1)%vnodes.length].h / RING) * Math.PI*2 - Math.PI/2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rad, a0, a1 < a0 ? a1 + Math.PI*2 : a1);
+      ctx.strokeStyle = COLORS[vnodes[i].node] + "55";
+      ctx.lineWidth = 26;
+      ctx.stroke();
+    }
+  }
+  ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI*2);
+  ctx.strokeStyle = "#30363d"; ctx.lineWidth = 2; ctx.stroke();
+  // key dots
+  let i = 0;
+  for (const [k, meta] of store) {
+    const a = (hashKey(k) / RING) * Math.PI*2 - Math.PI/2;
+    const rr = rad + 34 + (i % 3) * 12;
+    ctx.beginPath(); ctx.arc(cx + Math.cos(a)*rr, cy + Math.sin(a)*rr, 5, 0, Math.PI*2);
+    ctx.fillStyle = nodes[meta.owner].live ? COLORS[meta.owner] : DEAD;
+    ctx.fill();
+    if (++i > 120) break;
+  }
+  // node markers
+  const pos = {};
+  for (const n of nodes) {
+    const p = nodePos(n.id, cx, cy, rad) || {x:cx, y:cy};
+    pos[n.id] = p;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 26, 0, Math.PI*2);
+    ctx.fillStyle = n.live ? COLORS[n.id] : "#21262d";
+    ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = n.live ? "#e6edf3" : DEAD; ctx.stroke();
+    ctx.fillStyle = n.live ? "#0d1117" : DEAD;
+    ctx.font = "bold 26px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(n.live ? n.id : "✕", p.x, p.y + 1);
+    ctx.fillStyle = "#8b949e"; ctx.font = "20px monospace";
+    const cnt = [...store.values()].filter(m => m.owner === n.id).length;
+    ctx.fillText(n.live ? cnt + " keys" : "dead", p.x, p.y + 44);
+  }
+  // client marker
+  ctx.fillStyle = "#8b949e"; ctx.font = "20px monospace"; ctx.textAlign = "left";
+  ctx.fillText("client", 24, 40);
+  ctx.beginPath(); ctx.arc(70, 70, 14, 0, Math.PI*2); ctx.fillStyle = "#e6edf3"; ctx.fill();
+  pos.client = {x:70, y:70};
+  // flights
+  flights = flights.filter(f => {
+    f.t += 0.03;
+    const a = pos[f.from], b = pos[f.to];
+    if (!a || !b) { f.then(); return false; }
+    const t = Math.min(f.t, 1);
+    const x = a.x + (b.x-a.x)*t, y = a.y + (b.y-a.y)*t - Math.sin(t*Math.PI)*40;
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI*2);
+    ctx.fillStyle = f.kind === "repl" ? "#a371f7" : "#e6edf3"; ctx.fill();
+    ctx.fillStyle = "#8b949e"; ctx.font = "16px monospace";
+    ctx.fillText(f.key, x + 12, y - 10);
+    if (f.t >= 1) { f.then(); return false; }
+    return true;
+  });
+  requestAnimationFrame(draw);
+}
+logEl = document.getElementById("events");
+document.getElementById("b-write").onclick = () => doWrite();
+document.getElementById("b-read").onclick = () => doRead();
+document.getElementById("b-kill").onclick = killNode;
+document.getElementById("b-restart").onclick = restartNode;
+document.getElementById("b-reset").onclick = reset;
+const autoBtn = document.getElementById("b-auto");
+autoOn = true;
+autoBtn.onclick = () => { autoOn = !autoOn; autoBtn.textContent = "Auto traffic: " + (autoOn ? "on" : "off"); };
+setInterval(() => {
+  if (!autoOn || document.hidden) return;
+  if (Math.random() < 0.6) doWrite(); else doRead();
+}, 1600);
+reset();
+draw();
+</script>
+</body>
+</html>
